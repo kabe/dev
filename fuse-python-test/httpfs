@@ -1,0 +1,471 @@
+#!/usr/bin/python
+
+
+from fuse import Fuse
+import fuse
+import stat    # for file properties
+import os      # for filesystem modes (O_RDONLY, etc)
+import errno   # for error number codes (ENOENT, etc)
+               # - note: these must be returned as negatives
+import time
+import sys
+import urllib2
+import httplib
+import re
+try:
+    import syslog
+    syslog_available = True
+except:
+    syslog_available = False
+
+fuse.fuse_python_api = (0, 2)
+
+
+def dirFromList(list):
+    """Return a properly formatted list of items suitable to a dir listing.
+    >>> dirFromList([['a', 'b', 'c']])
+    [[('a', 0), ('b', 0), ('c', 0)]]
+    """
+    return [[(x, 0) for x in list]]
+
+
+def getDepth(path):
+    """Return the depth of a given path, zero-based from root ('/').
+    """
+    if path == '/':
+        return 0
+    else:
+        return path.count('/')
+
+
+def getParts(path):
+    """Return the slash-separated parts of a given path as a list.
+    """
+    if path == '/':
+        return [['/']]
+    else:
+        return path.split('/')
+
+
+class FileProperty(fuse.Stat):
+    """Represents fuse file property.
+    """
+
+    propindeces = (stat.ST_MODE, stat.ST_INO, stat.ST_DEV, stat.ST_NLINK,
+                 stat.ST_UID, stat.ST_GID, stat.ST_SIZE,
+                 stat.ST_ATIME, stat.ST_MTIME, stat.ST_CTIME)
+
+    def __init__(self, ):
+        """
+        """
+        self.st_mode  = 0
+        self.st_ino   = 0
+        self.st_dev   = 0
+        self.st_nlink = 0
+        self.st_uid   = 0
+        self.st_gid   = 0
+        self.st_size  = 0
+        self.st_atime = 0
+        self.st_mtime = 0
+        self.st_ctime = 0
+
+    def copy(self, ):
+        """Copy the object with the same property.
+        """
+        obj = FileProperty()
+        obj.st_mode  = self.st_mode
+        obj.st_ino   = self.st_ino
+        obj.st_dev   = self.st_dev
+        obj.st_nlink = self.st_nlink
+        obj.st_uid   = self.st_uid
+        obj.st_gid   = self.st_gid
+        obj.st_size  = self.st_size
+        obj.st_atime = self.st_atime
+        obj.st_mtime = self.st_mtime
+        obj.st_ctime = self.st_ctime
+        return obj
+
+    def dump(self, ):
+        """Print file property.
+        """
+        s = ""
+        attrs = []
+        for attr in ("st_mode", "st_ino", "st_dev", "st_nlink",
+                     "st_uid", "st_gid", "st_size",
+                     "st_atime", "st_mtime", "st_ctime"):
+            attrval = getattr(self, attr)
+            if attr in ("st_mode",):
+                attrs.append("%s: 0%o" % (attr, attrval))
+            elif attr in ("st_uid", "st_gid",):
+                attrs.append("%s: %d" % (attr, attrval))
+            else:
+                attrs.append("%s: 0x%X" % (attr, attrval))
+        s = ", ".join(attrs)
+        s = "<FileProperty %s>" % (s)
+        print s
+
+
+class Filer(object):
+    """Filename-filemanager mapper.
+    """
+
+    def __init__(self, ):
+        """
+        """
+        self._files = {}
+
+    def size(self, ):
+        """Returns the number of files this filer manages.
+        """
+        return len(self._files)
+
+    def add(self, fm):
+        """Add a list a filemanager.
+
+        @param fm a FileManager object
+        """
+        #print fm
+        key = fm.filename
+        self._files[key] = fm
+        print "Added file %s" % (key)
+
+    def get(self, fname):
+        """File getter.
+
+        @param fname
+        """
+        if fname.startswith("/"):
+            return self._files[fname[1:]]
+        else:
+            return self._files[fname]
+
+    def getfilenames(self, ):
+        """Return a generator of the list of file names.
+        """
+        return self._files.iterkeys()
+
+    def getfilemanagers(self, ):
+        """Return a generator of the list of FileManagers.
+        """
+        return self._files.itervalues()
+
+    filenames = property(getfilenames)
+    filemgrs = property(getfilemanagers)
+
+    class FileManager(object):
+        """File manager in the file system.
+        """
+
+        def _get_url(self):
+            return self._url
+
+        def _get_filename(self):
+            return self._bname
+
+        def _get_stat(self, ):
+            return self._stat
+
+        def _set_stat(self, stat):
+            self._stat = stat
+
+        url = property(_get_url)
+        filename = property(_get_filename)
+        stat = property(_get_stat, _set_stat)
+
+        def __init__(self, url):
+            """Initializer.
+
+            @param url HTTP url of the file
+            """
+            self._url = url
+            bname = os.path.basename(self._url)
+            self._bname = bname
+            self._stat = None
+
+        def __repr__(self, ):
+            """repr.
+            """
+            return "<FileManager Object for \"%s\">" % (self.filename)
+
+
+class HTTPFS(Fuse):
+    """
+    """
+
+    class HttpFsFileProperty(FileProperty):
+        """Represents HTTPFS file property.
+        """
+
+        def __init__(self, ):
+            """
+            """
+            FileProperty.__init__(self)
+
+    def _set_urlfile(self, value):
+        self._urlfile = value
+
+    def _get_urlfile(self):
+        return self._urlfile
+
+    def _set_launchdir(self, value):
+        self._launchdir = value
+
+    def _get_launchdir(self):
+        return self._launchdir
+
+    launchdir = property(_get_launchdir, _set_launchdir)
+    urlfile = property(_get_urlfile, _set_urlfile)
+    # re
+    httpsplitter = re.compile(r"^.*//(?P<server>[^/]+)/(?P<res>.*)$")
+
+    def __init__(self, *args, **kw):
+        Fuse.__init__(self, *args, **kw)
+        self.parse(errex=1)
+        if len(self.cmdline[1]) < 1:
+            self.parser.error("Specify the file name of url list")
+            sys.exit(1)
+        self.__syslog_init()
+        self.__init_root()
+        self.launchdir = "/"
+        print 'Init complete.'
+
+    def __init_root(self):
+        self.log("__init_root()")
+        root_stat = os.stat(self.fuse_args.mountpoint)
+        self.__root_stat = HTTPFS.HttpFsFileProperty()
+        self.__root_stat.st_mode  = root_stat[0]
+        self.__root_stat.st_ino   = root_stat[1]
+        self.__root_stat.st_dev   = root_stat[2]
+        self.__root_stat.st_nlink = root_stat[3]
+        self.__root_stat.st_uid   = root_stat[4]
+        self.__root_stat.st_gid   = root_stat[5]
+        self.__root_stat.st_size  = root_stat[6]
+        self.__root_stat.st_atime = root_stat[7]
+        self.__root_stat.st_mtime = root_stat[8]
+        self.__root_stat.st_ctime = root_stat[9]
+        self.__root_stat.dump()
+
+    def __syslog_init(self, ):
+        """Syslog initialization.
+        """
+        ident = "httpfs"
+        logopt = 0
+        facility = syslog.LOG_LOCAL0
+        self.use_syslog = syslog_available
+        if self.use_syslog:
+            syslog.openlog(ident, logopt, facility)
+
+    def __syslog_destroy(self, ):
+        """Syslog destroyer.
+        """
+        if self.use_syslog:
+            self.log("unmount")
+            syslog.closelog()
+
+    def log(self, mesg):
+        """Write a message to syslog.
+
+        @param mesg log message string
+        """
+        if self.use_syslog:
+            syslog.syslog(mesg)
+
+    def __init_files(self, ):
+        """
+        """
+        self.log("__init_files() (File %s)" % (self.urlfile))
+        self.filer = Filer()
+        try:
+            with open(os.path.join(self.launchdir, self.urlfile)) as f:
+                for line in f:
+                    self.log("process %s" % (line))
+                    self.filer.add(Filer.FileManager(line.strip()))
+        except Exception, e:
+            self.log(str(e))
+
+    def finalize(self, ):
+        """Finalizer.
+
+        This seems not to be called implicitly...
+        """
+        print "*** finalize"
+        self.__syslog_destroy()
+
+    def fsinit(self, ):
+        """Called when fs.main() called.
+        """
+        print "*** fsinit"
+        self.log("File system started (Urlfile: %s)" % (fs.urlfile))
+        self.log("cmdline " + repr(self.cmdline))
+        self.__init_files()
+
+    def getattr(self, path):
+        """
+        - st_mode (protection bits)
+        - st_ino (inode number)
+        - st_dev (device)
+        - st_nlink (number of hard links)
+        - st_uid (user ID of owner)
+        - st_gid (group ID of owner)
+        - st_size (size of file, in bytes)
+        - st_atime (time of most recent access)
+        - st_mtime (time of most recent content modification)
+        - st_ctime (platform dependent;
+                    time of most recent metadata change on Unix,
+                    or the time of creation on Windows).
+        """
+        def __get_filesize(fm):
+            """
+
+            @param fm FileManager
+            """
+            url = fm.url
+            m = HTTPFS.httpsplitter.match(url)
+            server = m.group("server")
+            residue = m.group("res")
+            c = httplib.HTTPConnection(server)
+            c.request("HEAD", url)
+            r = c.getresponse()
+            c.close()
+            return int(r.getheader("Content-Length"))
+
+        print '*** getattr', path
+        depth = getDepth(path)  # depth of path, zero-based from root
+        pathparts = getParts(path)  # the actual parts of the path
+        epath = path[1:]  # eliminate the first slash "/"
+        if path == "/":  # root
+            return self.__root_stat
+        elif epath in self.filer.filenames:
+            fm = self.filer.get(epath)
+            st = fm.stat
+            if not st:
+                st = HTTPFS.HttpFsFileProperty()
+                st.st_mode = 0100400  # File, read-only
+                st.st_nlink = 1
+                st.st_mtime = st.st_ctime = st.st_atime = int(time.time())
+                try:
+                    st.st_size = __get_filesize(fm)
+                except Exception, e:
+                    self.log("Get filesize failed: %s" % (repr(fm)))
+                st.dump()
+                self.filer.get(epath).stat = st
+            return st
+        else:
+            print "NOENT '%s'" % (epath)
+            return -errno.ENOENT
+
+    def readdir(self, path, offset):
+        """return: [[('file1', 0), ('file2', 0), ... ]]
+        """
+        print '*** readdir', path, offset
+        l = [".", "..", ]
+        l.extend(self.filer.filenames)
+        for ent in l:
+            yield fuse.Direntry(ent)
+
+    def mythread(self):
+        print '*** mythread'
+        return -errno.ENOSYS
+
+    def chmod(self, path, mode):
+        print '*** chmod', path, oct(mode)
+        return -errno.ENOSYS
+
+    def chown(self, path, uid, gid):
+        print '*** chown', path, uid, gid
+        return -errno.ENOSYS
+
+    def fsync(self, path, isFsyncFile):
+        print '*** fsync', path, isFsyncFile
+        return -errno.ENOSYS
+
+    def link(self, targetPath, linkPath):
+        print '*** link', targetPath, linkPath
+        return -errno.ENOSYS
+
+    def mkdir(self, path, mode):
+        print '*** mkdir', path, oct(mode)
+        return -errno.ENOSYS
+
+    def mknod(self, path, mode, dev):
+        print '*** mknod', path, oct(mode), dev
+        return -errno.ENOSYS
+
+    def open(self, path, flags):
+        print '*** open', path, flags
+        return 0
+
+    def read(self, path, length, offset):
+        print '*** read', path, length, offset
+        req_url = self.filer.get(path).url
+        req_range = "bytes=%d-%d" % (offset, offset + length - 1)
+        print "Request URL: %s Range: %s" % (req_url, req_range)
+        req = urllib2.Request(req_url)
+        req.add_header("Range", req_range)
+        r = urllib2.urlopen(req)
+        data = r.read()
+        try:
+            assert len(data) == length
+        except AssertionError, e:
+            print "Assertion Failed " \
+                  "Real: %d Expected: %d" % (len(data), length)
+        #print data
+        return data
+
+    def readlink(self, path):
+        print '*** readlink', path
+        return -errno.ENOSYS
+
+    def release(self, path, flags):
+        print '*** release', path, flags
+        return -errno.ENOSYS
+
+    def rename(self, oldPath, newPath):
+        print '*** rename', oldPath, newPath
+        return -errno.ENOSYS
+
+    def rmdir(self, path):
+        print '*** rmdir', path
+        return -errno.ENOSYS
+
+    def statfs(self):
+        print '*** statfs'
+        return -errno.ENOSYS
+
+    def symlink(self, targetPath, linkPath):
+        print '*** symlink', targetPath, linkPath
+        return -errno.ENOSYS
+
+    def truncate(self, path, size):
+        print '*** truncate', path, size
+        return -errno.ENOSYS
+
+    def unlink(self, path):
+        print '*** unlink', path
+        return -errno.ENOSYS
+
+    def utime(self, path, times):
+        print '*** utime', path, times
+        return -errno.ENOSYS
+
+    def write(self, path, buf, offset):
+        print '*** write', path, buf, offset
+        return -errno.ENOSYS
+
+
+def usagestr():
+    """Usage string.
+    """
+    return """Usage:
+""" + fuse.Fuse.fusage
+
+
+if __name__ == "__main__":
+    fs = HTTPFS(version="%prog " + fuse.__version__,
+                usage=usagestr(),)
+    fs.flags = 0
+    fs.multithreaded = 0
+    fs.urlfile = fs.cmdline[1][0]
+    fs.launchdir = os.getcwd()
+    fs.main()
+    fs.finalize()
