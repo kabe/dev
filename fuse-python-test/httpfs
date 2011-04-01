@@ -159,6 +159,9 @@ class Filer(object):
         def _get_url(self):
             return self._url
 
+        def _set_url(self, url):
+            self._url = url
+
         def _get_filename(self):
             return self._bname
 
@@ -168,7 +171,7 @@ class Filer(object):
         def _set_stat(self, stat):
             self._stat = stat
 
-        url = property(_get_url)
+        url = property(_get_url, _set_url)
         filename = property(_get_filename)
         stat = property(_get_stat, _set_stat)
 
@@ -326,6 +329,22 @@ class HTTPFS(Fuse):
             c = httplib.HTTPConnection(server)
             c.request("HEAD", url)
             r = c.getresponse()
+            status = int(r.status)
+            try:
+                assert int(status / 100) == 2
+            except:
+                # Can be redirect: update URL
+                if int(status / 100) == 3:
+                    newurl = r.getheader("Location")
+                    fm.url = newurl
+                    self.log("Redirect detected: reload %s" % (newurl))
+                    c.close()
+                    return __get_filesize(fm)
+                else:
+                    msg = r.msg
+                    reason = r.reason
+                    self.log("Get filesize failed. " \
+                                 "msg: %s reason: %s" % (msg, reason))
             c.close()
             return int(r.getheader("Content-Length"))
 
