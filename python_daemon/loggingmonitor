@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+
+from __future__ import with_statement
+import daemon
+import subprocess
+import syslog
+import socket
+import time
+
+
+class DaemonManager(object):
+    """
+    """
+
+    def _set_interval(self, value):
+        self._interval = float(value)
+
+    def _get_interval(self):
+        return self._interval
+
+    def _set_mailto(self, value):
+        self._mailto = value
+
+    def _get_mailto(self):
+        return self._mailto
+
+    def _set_nouse_threshold(self, value):
+        self._nouse_threshold = float(value)
+
+    def _get_nouse_threshold(self):
+        return self._nouse_threshold
+
+    def _set_report_interval(self, value):
+        self._report_interval = float(value)
+
+    def _get_report_interval(self):
+        return self._report_interval
+
+    report_interval = property(_get_report_interval, _set_report_interval)
+    nouse_threshold = property(_get_nouse_threshold, _set_nouse_threshold)
+    mailto = property(_get_mailto, _set_mailto)
+    interval = property(_get_interval, _set_interval)
+
+    def __init__(self, ):
+        """
+        """
+        syslog.openlog("loggingmonitor", 0, syslog.LOG_LOCAL0)
+        self.interval = 0
+        self.hostname = socket.gethostbyaddr(socket.gethostname())[0]
+        self.lastcheck = 0  # Last time someone's logging in detected
+        self.lastreport = 0  # Last time reported
+
+    def run(self, ):
+        """
+        """
+        outfile = open("lm.log", "a+")
+        errfile = open("lm.err", "a+")
+        self.dc = daemon.DaemonContext(stdout=outfile, stderr=errfile)
+        with self.dc:
+            syslog.syslog("Started")
+            process = ("who",)
+            self.report()
+            while True:
+                sp = subprocess.Popen(process, stdout=subprocess.PIPE)
+                sp.wait()
+                res = sp.stdout.read()
+                nlines = res.count("\n")
+                syslog.syslog("check: %d lastcheck %d" % \
+                                  (nlines, self.lastcheck))
+                if nlines == 0:  # No one is using
+                    now = time.time()
+                    if self.lastcheck != 0 and \
+                            now - self.lastcheck > self.nouse_threshold:
+                        self.report()
+                else:  # Someone is logging in
+                    self.lastcheck = time.time()
+                time.sleep(self.interval)
+        outfile.close()
+
+    def report(self, ):
+        """Report
+        """
+        syslog.syslog("Report Start")
+        now = time.time()
+        try:
+            if self.lastreport == 0 or \
+                    now - self.lastreport > self.report_interval:
+                mailcmd = ("mail", "-s", "NO_ONE_USING %s" % (self.hostname),
+                           self.mailto)
+                msp = subprocess.Popen(mailcmd, stdin=subprocess.PIPE)
+                mesg = """No one is using %s for specified period (%f seconds).
+    Please think of shutting down.""" % (self.hostname, self.nouse_threshold)
+                msp.stdin.write(mesg)
+                msp.stdin.close()
+                msp.wait()
+                self.lastreport = now
+                syslog.syslog("Report done")
+            else:
+                syslog.syslog("Report called but suppressed.")
+        except Exception, e:
+            syslog("Report failed! Detail: %s" % (str(e)))
+
+
+def main():
+    """
+    """
+    dm = DaemonManager()
+    dm.interval = 60
+    dm.nouse_threshold = 600
+    dm.report_interval = 3600
+    dm.mailto = "kabe@logos.ic.i.u-tokyo.ac.jp"
+    dm.run()
+
+
+if __name__ == '__main__':
+    main()
