@@ -94,7 +94,7 @@ def get_credentials():
     """Get credential information from Pit.
     """
     conf = Pit.get("Google")
-    if not conf:
+    if "login" not in conf.keys():
         # If not exists, exception will be raised
         editor = os.environ["EDITOR"]
         conf = Pit.get(
