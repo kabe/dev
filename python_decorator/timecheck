@@ -4,26 +4,46 @@
 import modules.ptime
 
 
-def performance(f):
+do_performance = True
+
+
+#
+# Decorator function
+#
+def performance(really):
     """
     """
-    def _(*args):
-        sw = modules.ptime.StopWatch()
-        sw.start()
-        f(*args)
-        sw.stop()
-        print sw.total_second()
+    def _(f):
+        def __(*args, **keywords):
+            if really:
+                sw = modules.ptime.StopWatch()
+                sw.start()
+                f(*args, **keywords)
+                sw.stop()
+                print sw.total_second()
+            else:
+                f(*args, **keywords)
+        return __
     return _
 
 
-@performance
-def func(a, b, c):
+@performance(do_performance)
+def func1(a, b, c):
     import time
     time.sleep(a + b + c)
+    print "func1: Waited %f seconds" % (a + b + c)
+
+
+@performance(do_performance)
+def func2(a, b, c, d):
+    import time
+    time.sleep(a + b + c + d)
+    print "func2: Waited %f seconds" % (a + b + c + d)
 
 
 def main():
-    func(0.5, 0.3, 1.1)
+    func1(0.5, 0.3, 1.1)
+    func2(0.5, 0.3, 0.1, 0.2)
 
 
 if __name__ == '__main__':
