@@ -1,0 +1,30 @@
+#!/usr/bin/env python
+
+
+import modules.ptime
+
+
+def performance(f):
+    """
+    """
+    def _(*args):
+        sw = modules.ptime.StopWatch()
+        sw.start()
+        f(*args)
+        sw.stop()
+        print sw.total_second()
+    return _
+
+
+@performance
+def func(a, b, c):
+    import time
+    time.sleep(a + b + c)
+
+
+def main():
+    func(0.5, 0.3, 1.1)
+
+
+if __name__ == '__main__':
+    main()
